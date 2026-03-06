@@ -6,9 +6,14 @@ inputfile = 'input_tensor.csv'
 outputfile = 'output_tensor.csv'
 dataname = 'JX_NN'
 
-b_size     = 100
-num_epochs = 1000
-ln_rate    = 1e-3
+#b_size     = 100
+#num_epochs = 1000
+#ln_rate    = 1e-3
+
+num_epochs = 10000   # was 1000
+b_size     = 50      # smaller batches often help for regression
+ln_rate    = 1e-4    # reduce after initial training
+
 
 modelname      = dataname + '_model.pth'
 training_error = dataname + '_error.mat'
