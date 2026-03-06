@@ -17,7 +17,7 @@ N_in = 169  # input dimension of your FC network
 x = rand(Float32, 1, N_in)  # Shape: (1, 169)
 
 # Run inference
-y = sess(Dict(input_name => x))
+y = sess(Dict(input_name => x)) # Bie 
 
 # Extract output
 ŷ = y[output_name]

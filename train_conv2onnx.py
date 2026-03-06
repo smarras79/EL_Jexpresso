@@ -28,13 +28,26 @@ model.eval()
 example_input = torch.randn(1, N_in, device=device)
 
 # Export the model
-torch.onnx.export(model,               # model being run
-                  example_input,       # model input (or a tuple for multiple inputs)
-                  onnxname,        # where to save the model (can be a file or file-like object)
-                  export_params=True,  # store the trained parameter weights inside the model file
-                  opset_version=12,    # the ONNX version to export the model to
-                  do_constant_folding=True,  # whether to execute constant folding for optimization
-                  input_names = ['input'],   # the model's input names
-                  output_names = ['output'], # the model's output names
-                  dynamic_axes={'input' : {0 : 'batch_size'},    # variable length axes
-                                'output' : {0 : 'batch_size'}})
+torch.onnx.export(model,               
+                  example_input,       
+                  onnxname,        
+                  export_params=True,  
+                  opset_version=17, # Try 17; it's often more stable than 18 for Julia
+                  do_constant_folding=True,  
+                  input_names = ['input'],   
+                  output_names = ['output'],
+                  # Remove dynamic_axes temporarily to see if it simplifies the file structure
+                  # If you need it, add it back after confirming a basic export works
+                 )
+
+
+#torch.onnx.export(model,               # model being run
+#                  example_input,       # model input (or a tuple for multiple inputs)
+#                  onnxname,        # where to save the model (can be a file or file-like object)
+#                  export_params=True,  # store the trained parameter weights inside the model file
+#                  opset_version=18,    # the ONNX version to export the model to
+#                  do_constant_folding=True,  # whether to execute constant folding for optimization
+#                  input_names = ['input'],   # the model's input names
+#                  output_names = ['output'], # the model's output names
+#                  dynamic_axes={'input' : {0 : 'batch_size'},    # variable length axes
+#                                'output' : {0 : 'batch_size'}})
