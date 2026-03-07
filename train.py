@@ -6,7 +6,7 @@ inputfile = 'input_tensor.csv'
 outputfile = 'output_tensor.csv'
 dataname = 'JX_NN'
 
-num_epochs = 2000   # was 1000
+num_epochs = 4000   # was 1000
 b_size     = 50      # smaller batches often help for regression
 ln_rate    = 2e-5    # reduce after initial training
 
