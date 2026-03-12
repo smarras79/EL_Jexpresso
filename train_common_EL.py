@@ -66,7 +66,7 @@ def train_and_eval(
     scheduler            = None,   # e.g. ReduceLROnPlateau instance
     early_stop_patience  = None,   # int; None = disabled
     grad_clip_norm       = 1.0,    # max_norm for clip_grad_norm_; None = disabled
-    plot_callback = None,
+    plot_callback        = None,   # callable(epoch_idx, train_hist, test_hist)
 ):
     """
     Core training + evaluation loop with optional:
@@ -154,6 +154,10 @@ def train_and_eval(
              if early_stop_patience is not None else "")
         )
 
+        # ── Plot callback ─────────────────────────────────────────────────────
+        if plot_callback is not None:
+            plot_callback(epoch_idx, train_loss_history, test_loss_history)
+
         # ── Early stopping ────────────────────────────────────────────────────
         if early_stop_patience is not None and \
                 patience_counter >= early_stop_patience:
@@ -161,9 +165,6 @@ def train_and_eval(
                   f"(no improvement for {early_stop_patience} epochs).")
             stopped_early = True
             break
-
-        if plot_callback is not None:
-            plot_callback(epoch_idx, train_loss_history, test_loss_history)
 
     # ── Save last-epoch checkpoint ────────────────────────────────────────────
     if modelname is not None:
