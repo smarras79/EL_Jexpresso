@@ -1,183 +1,72 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# NN_RFRC.jl  —  Recurrence-Free Reservoir Computer (RF-RC) model
-# ─────────────────────────────────────────────────────────────────────────────
-# Julia convention: matrices are (features × samples), i.e. column-major.
-# All layer weights are (out_dim × in_dim) so  y = W * x + b  works directly.
-# ─────────────────────────────────────────────────────────────────────────────
-
 module NNRFRC
 
-using LinearAlgebra, Random, Statistics
+using LinearAlgebra, Statistics
 
-export ReservoirLayer, RFRC, get_features, fit_readout!, evaluate_model,
-       l1_loss, l2_loss
+# Exporting for use in the main script
+export RFRC, fit_readout!, get_features, l1_loss
 
-# ── Activation functions ─────────────────────────────────────────────────────
-const ACTIVATIONS = Dict{String, Function}(
-    "tanh"    => tanh,
-    "relu"    => x -> max(zero(x), x),
-    "sigmoid" => x -> one(x) / (one(x) + exp(-x)),
-    "elu"     => x -> x >= zero(x) ? x : exp(x) - one(x),
-)
-
-# ── Single reservoir layer ────────────────────────────────────────────────────
-"""
-    ReservoirLayer{T}
-
-Fixed (non-trainable) random affine map followed by a nonlinear activation.
-Weights are drawn once at construction and never updated.
-"""
-struct ReservoirLayer{T <: AbstractFloat}
-    W   :: Matrix{T}   # (out_dim × in_dim)  frozen
-    b   :: Vector{T}   # (out_dim,)          frozen zeros
-    act :: Function
+struct RFRC{T}
+    W_in::Matrix{T}
+    W_res::Matrix{T}
+    W_out::Matrix{T}
+    b_out::Vector{T}
+    ridge_alpha::T
+    activation::Function
 end
 
-function ReservoirLayer(T::Type, in_dim::Int, out_dim::Int;
-                        activation    = "tanh",
-                        input_scaling = one(T),
-                        rng           = Random.default_rng())
-    haskey(ACTIVATIONS, activation) ||
-        error("Unknown activation '$activation'. " *
-              "Choose from: $(collect(keys(ACTIVATIONS)))")
-    # Uniform draw on [-input_scaling, +input_scaling]
-    W = rand(rng, T, out_dim, in_dim) .* T(2input_scaling) .- T(input_scaling)
-    return ReservoirLayer{T}(W, zeros(T, out_dim), ACTIVATIONS[activation])
+# Optimized Constructor
+function RFRC(T, N_in, N_out; reservoir_dim=2048, num_layers=3, ridge_alpha=1e-4, activation="tanh")
+    act_fn = activation == "tanh" ? tanh : x -> x # Default to tanh
+    W_in  = randn(T, reservoir_dim, N_in) .* T(0.1)
+    W_res = randn(T, reservoir_dim, reservoir_dim) .* T(0.01)
+    W_out = zeros(T, N_out, reservoir_dim)
+    b_out = zeros(T, N_out)
+    return RFRC{T}(W_in, W_res, W_out, b_out, T(ridge_alpha), act_fn)
 end
 
-# Apply: x (in_dim × N)  →  act.(W*x .+ b)  (out_dim × N)
-(l::ReservoirLayer)(x) = l.act.(l.W * x .+ l.b)
-
-
-# ── RF-RC model ───────────────────────────────────────────────────────────────
-"""
-    RFRC{T}
-
-Recurrence-Free Reservoir Computer.
-
-Architecture
-------------
-    Input (N_in)
-      → [Fixed Random Reservoir Layer] × num_layers    (no gradients)
-      → Trainable Linear Readout  (output layer)
-
-Training
---------
-Only `W_out` and `b_out` are trainable.  Primary fit is one-shot ridge
-regression via the augmented least-squares system:
-
-    [H^T ; √α·I]  W_out^T  =  [Y^T ; 0]
-
-where H = get_features(X_train).  No backprop, no epoch loop.
-An optional Adam fine-tuning pass is available in train_rfrc.jl.
-
-Fields
-------
-- `reservoir`    : Vector of frozen ReservoirLayer
-- `W_out`        : (output_size × reservoir_dim)  trainable
-- `b_out`        : (output_size,)                 trainable
-- `ridge_alpha`  : ridge regularisation coefficient
-"""
-mutable struct RFRC{T <: AbstractFloat}
-    reservoir     :: Vector{ReservoirLayer{T}}
-    W_out         :: Matrix{T}
-    b_out         :: Vector{T}
-    ridge_alpha   :: T
-    reservoir_dim :: Int
-    output_size   :: Int
-    input_size    :: Int
+# HIGH-PERFORMANCE FEATURE EXTRACTION
+function get_features(model::RFRC{T}, X::Matrix{T}) where T
+    # X is (N_in x N_samples)
+    # H = activation(W_in * X)
+    # We use 'mul!' to avoid creating temporary matrices in memory
+    H = Matrix{T}(undef, size(model.W_in, 1), size(X, 2))
+    mul!(H, model.W_in, X)
+    H .= model.activation.(H)
+    return H
 end
 
-function RFRC(T::Type, input_size::Int, output_size::Int;
-              reservoir_dim = 1024,
-              num_layers    = 3,
-              activation    = "tanh",
-              input_scaling = 1.0,
-              ridge_alpha   = 1e-4,
-              rng           = Random.default_rng())
-    layers   = Vector{ReservoirLayer{T}}(undef, num_layers)
-    prev_dim = input_size
-    for i = 1:num_layers
-        layers[i] = ReservoirLayer(T, prev_dim, reservoir_dim;
-                                   activation    = activation,
-                                   input_scaling = T(input_scaling),
-                                   rng           = rng)
-        prev_dim = reservoir_dim
-    end
-    return RFRC{T}(layers,
-                   zeros(T, output_size, reservoir_dim),
-                   zeros(T, output_size),
-                   T(ridge_alpha), reservoir_dim, output_size, input_size)
+# HIGH-PERFORMANCE RIDGE FIT
+function fit_readout!(model::RFRC{T}, X::Matrix{T}, Y::Matrix{T}) where T
+    H = get_features(model, X)
+    D, N = size(H)
+
+    # Instead of H*H', we solve the Ridge problem directly:
+    # (H' | sqrt(alpha)*I) * W_out' = (Y' | 0)
+    # This is MUCH more stable in Float32.
+    
+    # 1. Augment H and Y for Ridge Regression
+    # We use a 'Tall' matrix approach: A = [H'; sqrt(alpha)*I]
+    sqrt_alpha = sqrt(model.ridge_alpha)
+    A = [transpose(H); sqrt_alpha * I(D)]
+    B = [transpose(Y); zeros(T, D, size(Y, 1))]
+
+    # 2. Solve using QR decomposition (stable and robust)
+    # Julia's '\' operator chooses the best algorithm for the shape
+    W_out_T = A \ B
+    
+    # 3. Assign back
+    model.W_out .= transpose(W_out_T)
+    model.b_out .= vec(mean(Y, dims=2))
 end
 
-# ── Forward pass ─────────────────────────────────────────────────────────────
-"""
-    get_features(model, x)
-
-Pass `x` through the frozen reservoir.
-- x    : (input_size × N)
-- returns (reservoir_dim × N)
-"""
-function get_features(m::RFRC, x)
-    h = x
-    for layer in m.reservoir
-        h = layer(h)
-    end
-    return h
+function l1_loss(y_pred, y_true)
+    return mean(abs.(y_pred .- y_true))
 end
 
-"""
-    model(x)
-
-Full forward pass: reservoir → linear readout.
-- x       : (input_size × N)
-- returns : (output_size × N)
-"""
-(m::RFRC)(x) = m.W_out * get_features(m, x) .+ m.b_out
-
-
-# ── Loss functions ────────────────────────────────────────────────────────────
-l1_loss(ŷ, y) = mean(abs.(ŷ .- y))
-l2_loss(ŷ, y) = mean((ŷ .- y) .^ 2)
-
-evaluate_model(m::RFRC, X, Y, crit) = crit(m(X), Y)
-
-
-# ── One-shot ridge regression ─────────────────────────────────────────────────
-"""
-    fit_readout!(model, X_train, Y_train) → NamedTuple
-
-Closed-form ridge regression fit of `W_out` and `b_out`.
-
-Solves the numerically stable augmented system:
-
-    [H^T ; √α·I_D] · W_out^T  =  [Y^T ; 0]
-
-which is equivalent to (H H^T + αI)^{-1} H Y^T but avoids inverting a
-potentially singular matrix.  Julia's `\\` dispatches to LAPACK gelsd/gelsy
-for overdetermined systems.
-
-- X_train : (input_size  × N_train)
-- Y_train : (output_size × N_train)
-"""
-function fit_readout!(m::RFRC{T}, X_train::Matrix{T}, Y_train::Matrix{T}) where T
-    H  = get_features(m, X_train)   # (D × N)
-    Ht = Matrix(transpose(H))       # (N × D)  — copy needed for \
-    Yt = Matrix(transpose(Y_train)) # (N × out)
-    D  = m.reservoir_dim
-    sa = sqrt(m.ridge_alpha)
-
-    H_aug = vcat(Ht, sa .* Matrix{T}(I, D, D))              # ((N+D) × D)
-    Y_aug = vcat(Yt, zeros(T, D, m.output_size))             # ((N+D) × out)
-
-    W_T = H_aug \ Y_aug   # (D × out) — LAPACK least-squares, never singular
-    m.W_out .= transpose(W_T)
-    fill!(m.b_out, zero(T))
-
-    return (H_shape     = size(Ht),
-            Y_shape     = size(Yt),
-            W_shape     = size(W_T),
-            ridge_alpha = m.ridge_alpha)
+function evaluate_model(model, X, Y, loss_fn)
+    H = get_features(model, X)
+    Y_pred = model.W_out * H .+ model.b_out
+    return loss_fn(Y_pred, Y)
 end
 
-end  # module NNRFRC
+end # module
